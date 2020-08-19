@@ -47,7 +47,7 @@ parser.add_argument('--max_hops','-mh',default=6)
 # parser.add_argument('--slot_dim','-sdim',default=28)
 # parser.add_argument('--intent_dim','-idim',default=4)
 
-if_exk = True
+if_exk = False
 if if_exk:
     parser.set_defaults(data_dir='data/Exk')
     parser.set_defaults(num_epoch=1)

@@ -32,6 +32,7 @@ class Processor(object):
         self.__dataset = dataset
         self.__model = model
         self.__batch_size = args.batch_size
+        self.__args = args
 
         if torch.cuda.is_available():
             time_start = time.time()
@@ -76,9 +77,9 @@ class Processor(object):
                 turn_slot_loss_list = []
                 turn_intent_loss_list = []
                 turn_loss_list = []
-                # 每一轮都最新初始化
-                # self.prev_intent_list = [[torch.zeros(1, len(self.__dataset.intent_alphabet))]]
-                # self.prev_slot_list = [[torch.zeros(1, len(self.__dataset.slot_alphabet))]]
+                # 每一dilaogue都最新初始化
+                prev_intent_list = [torch.zeros(1, self.__args.intent_decoder_hidden_dim).cuda()]
+                prev_slot_list = [torch.zeros(1, self.__args.slot_decoder_hidden_dim).cuda()]
 
                 digit_intent_list, text_intent_list = [], []
                 local_list = [[] for _ in range(self.__batch_size)]
@@ -108,17 +109,17 @@ class Processor(object):
                             text_triple_batch.append([[0,0,0]])
                             uuid_batch.append('0')
 
+                    "---------------------------local-------------------------"
+                    # prev_slot_tensor = Variable(torch.cat(prev_slot_list, dim=0), requires_grad=True)
+                    # prev_intent_tensor = Variable(torch.cat(prev_intent_list, dim=0), requires_grad=True)
+                    prev_slot_tensor = Variable(prev_slot_list[-1], requires_grad=True)
+                    prev_intent_tensor = Variable(prev_intent_list[-1], requires_grad=True)
+
                     # 在这里解决的kb 和triple 的对应和padding问题 ,
                     padded_text, seq_lens, sorted_dial_id, sorted_turn_id, sorted_history, sorted_slot, sorted_intent, sorted_kb, sorted_text_triple = self.__dataset.add_padding(
                         text_batch, dial_id_batch, turn_id_batch,history_batch, slot_batch, intent_batch, kb_batch, text_triple_batch, digital=True
                     )
 
-
-                    # print("true intent {}".format(intent_batch))
-                    # print(self.__dataset.slot_alphabet_list[intent_batch[0][0]])
-                    # print(slot_batch)
-
-                    # add padding既有padding 又有排序
                     sorted_intent = [item * num for item, num in zip(sorted_intent, seq_lens)]
                     sorted_intent = list(Evaluator.expand_list(sorted_intent))
 
@@ -151,17 +152,20 @@ class Processor(object):
                     # 1 都有
                     if random_slot < self.__dataset.slot_forcing_rate and random_intent < self.__dataset.intent_forcing_rate:
                         # def forward(self, text, seq_lens, n_predicts=None, forced_slot=None, forced_intent=None)
-                        slot_out, intent_out, slot_idx, intent_idx = self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens,forced_slot=slot_var, forced_intent=intent_var, turn_index=turn_index, local=local_var , if_train =True)
+                        slot_out, intent_out, prev_slot, prev_intent= self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens,forced_slot=slot_var, forced_intent=intent_var, turn_index=turn_index, local=local_var , if_train =True , prev_slot=prev_slot_tensor, prev_intent=prev_intent_tensor)
                     # 2 只有slot
                     elif random_slot < self.__dataset.slot_forcing_rate:
-                        slot_out, intent_out, slot_idx, intent_idx = self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens,forced_slot=slot_var, turn_index=turn_index, local=local_var , if_train =True)
+                        slot_out, intent_out, prev_slot, prev_intent = self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens,forced_slot=slot_var, turn_index=turn_index, local=local_var , if_train =True, prev_slot=prev_slot_tensor, prev_intent=prev_intent_tensor)
                     # 3 只有intent
                     elif random_intent < self.__dataset.intent_forcing_rate:
-                        slot_out, intent_out, slot_idx, intent_idx = self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens, forced_intent=intent_var, turn_index=turn_index, local=local_var , if_train =True)
+                        slot_out, intent_out, prev_slot, prev_intent = self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens, forced_intent=intent_var, turn_index=turn_index, local=local_var , if_train =True, prev_slot=prev_slot_tensor, prev_intent=prev_intent_tensor)
                     # 4 啥玩意都没有
                     else:
-                        slot_out, intent_out, slot_idx, intent_idx = self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens, turn_index=turn_index, local=local_var , if_train =True)
+                        slot_out, intent_out, prev_slot, prev_intent = self.__model(text_var, kb=kb_var, history=history_var, text_triple=text_triple_var, seq_lens=seq_lens, turn_index=turn_index, local=local_var , if_train =True, prev_slot=prev_slot_tensor, prev_intent=prev_intent_tensor)
 
+                    "------------extrac local-------------------------"
+                    prev_slot_list.append(prev_slot)
+                    prev_intent_list.append(prev_intent)
                     "------------extrac local-------------------------"
                     # self.prev_slot_list.append([slot_local])
                     # self.prev_intent_list.append([intent_local])
@@ -222,20 +226,9 @@ class Processor(object):
                     turn_loss = turn_slot_loss + turn_intent_loss
                     turn_loss = turn_loss/len(data_detail_batch) #loss regularization
                     turn_loss.backward()
-                    # self.__optimizer.step()
-                    # self.__optimizer.zero_grad()
-
-                    # turn_slot_loss_list.append(turn_slot_loss)
-                    # turn_intent_loss_list.append(turn_intent_loss)
-                    # turn_loss_list.append((turn_loss))
-                # slot_loss += turn_slot_loss
-                # intent_loss += turn_intent_loss
-                # batch_loss = slot_loss + intent_loss
 
                 self.__optimizer.step()
                 self.__optimizer.zero_grad()
-                # dialogue_loss.backward()
-
 
                 # try:
                 #     total_slot_loss += slot_loss.cpu().item()
@@ -295,11 +288,11 @@ class Processor(object):
 
         if if_dev:
             pred_slot, real_slot, pred_intent, real_intent, _ = self.prediction(
-                self.__model, self.__dataset, "dev", test_batch
+                self.__model, self.__dataset, "test", test_batch
             )
         else:
             pred_slot, real_slot, pred_intent, real_intent, _ = self.prediction(
-                self.__model, self.__dataset, "test", test_batch
+                self.__model, self.__dataset, "dev", test_batch
             )
         # 用于计算F1
 
@@ -380,9 +373,9 @@ class Processor(object):
         model.eval()
 
         if mode == "dev":
-            dataloader = dataset.batch_delivery('test', batch_size=batch_size, shuffle=False, is_digital=False)
-        elif mode == "test":
             dataloader = dataset.batch_delivery('dev', batch_size=batch_size, shuffle=False, is_digital=False)
+        elif mode == "test":
+            dataloader = dataset.batch_delivery('test', batch_size=batch_size, shuffle=False, is_digital=False)
         else:
             raise Exception("Argument error! mode belongs to {\"dev\", \"test\"}.")
 
@@ -393,14 +386,14 @@ class Processor(object):
 
         max_column_len = 9
         slot_num = 3
+        slot_dim, intent_dim = 128, 128
 
         for data_detail_batch in tqdm(dataloader, ncols=50):
             dial_id_batch, turn_id_batch, history_batch, slot_batch, text_batch, intent_batch, kb_batch, text_triple_batch, uuid_batch = [], [], [], [], [], [], [], [], []  # claim here
 
-            # prev_slot_list = [[torch.zeros(1, len(dataset.slot_alphabet))]]
-            # prev_intent_list = [[torch.zeros(1, len(dataset.intent_alphabet))]]
+            prev_intent_list = [torch.zeros(1, intent_dim).cuda()]
+            prev_slot_list = [torch.zeros(1, slot_dim).cuda()]
 
-            # print("==================")
             digit_intent_list = []
             text_intent_list = []
             local_list = [[]for _ in range(batch_size)]
@@ -430,26 +423,17 @@ class Processor(object):
                         kb_batch.append([textPAD])
                         text_triple_batch.append([textPAD])
                         uuid_batch.append('0')
-                # print("dial_id {}".format(dial_id_batch))
-                # print("turn_id {}".format(turn_id_batch))
-                # print("history {}".format(history_batch))
-                # print("slot {}".format(slot_batch))
-                # print("text {}".format(text_batch))
-                # print("intent {}".format(intent_batch))
-                # print("kb {}".format(kb_batch))
-                # print("text_triple {}".format(text_triple_batch))
-                # print(uuid_batch)
-                # print("------------------")
 
-                # print("---------------")
+                # prev_slot_tensor = Variable(torch.cat(prev_slot_list, dim=0), requires_grad=True)
+                # prev_intent_tensor = Variable(torch.cat(prev_intent_list, dim=0), requires_grad=True)
+                prev_slot_tensor = Variable(prev_slot_list[-1], requires_grad=True)
+                prev_intent_tensor = Variable(prev_intent_list[-1], requires_grad=True)
+
                 padded_text, seq_lens, sorted_dial_id, sorted_turn_id, \
                 sorted_history, sorted_slot, sorted_intent, sorted_kb, sorted_text_triple = dataset.add_padding(
                     text_batch, dial_id_batch, turn_id_batch,
                     history_batch, slot_batch, intent_batch, kb_batch, text_triple_batch, digital=False
                 )
-                # print(slot_batch)
-                # print("-------------------------------------")
-                # print("true intent {}".format(dataset.intent_alphabet.get_index(intent_batch)))
                 real_slot.extend(sorted_slot)
                 real_intent.extend(list(Evaluator.expand_list(sorted_intent)))
                 digit_text = dataset.word_alphabet.get_index(padded_text)
@@ -471,28 +455,23 @@ class Processor(object):
 
                 digit_local = dataset.word_alphabet.get_index(local_list)
 
-                if turn_index != 0:
-                    local_var = Variable(torch.LongTensor(digit_local))
-                else:
-                    local_var = Variable(torch.zeros(batch_size, max_column_len, slot_num))
-                    local_var = local_var.long()
+                # if turn_index != 0:
+                #     local_var = Variable(torch.LongTensor(digit_local))
+                # else:
+                #     local_var = Variable(torch.zeros(batch_size, max_column_len, slot_num))
+                #     local_var = local_var.long()
                 if torch.cuda.is_available():
                     var_text = var_text.cuda()
                     var_kb = var_kb.cuda()
                     var_history = var_history.cuda()
                     var_text_triple= var_text_triple.cuda()
-                    local_var =local_var.cuda()
+                    # local_var =local_var.cuda()
 
-                # print(padded_text)
-                # print(sorted_intent)
-                # 在这里重新输入到model中
-                slot_idx, intent_idx = model(text=var_text, kb=var_kb, history= var_history, text_triple=var_text_triple, seq_lens=seq_lens, n_predicts=1, turn_index=turn_index, local=local_var, if_train=False)
+                slot_idx, intent_idx, prev_slot, prev_intent = model(text=var_text, kb=var_kb, history= var_history, text_triple=var_text_triple, seq_lens=seq_lens, n_predicts=1, turn_index=turn_index, if_train=False , prev_slot=prev_slot_tensor, prev_intent=prev_intent_tensor )
 
                 # add local knowledge for next turn
-                # prev_slot_list.append([slot_local])
-                # prev_intent_list.append([intent_local])
-
-
+                prev_slot_list.append(prev_slot)
+                prev_intent_list.append(prev_intent)
 
                 nested_intent = Evaluator.nested_list([list(Evaluator.expand_list(intent_idx))], seq_lens)[0]
                 pred_intent.extend(dataset.intent_alphabet.get_instance(nested_intent))

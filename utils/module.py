@@ -120,7 +120,7 @@ class ModelManager(nn.Module):
             output_dim=self.__max_num_slot,
             dropout_rate=self.__args.dropout_rate,
             embedding_dim=self.__args.slot_embedding_dim,
-            # extra_dim=self.__num_intent,
+            extra_dim=self.__num_intent,
             mem_dim=self.__mem_embedding_dim,
             lk_dim=self.__args.local_knowledge_hidden_dim,
             his_dim=self.__args.history_hidden_dim,
@@ -134,6 +134,7 @@ class ModelManager(nn.Module):
             output_dim=self.__max_num_slot,
             dropout_rate=self.__args.dropout_rate,
             embedding_dim=self.__args.slot_embedding_dim,
+            extra_dim=self.__num_intent,
             mem_dim=self.__mem_embedding_dim,
             lk_dim=self.__args.local_knowledge_hidden_dim,
             his_dim=self.__args.history_hidden_dim,
@@ -146,6 +147,7 @@ class ModelManager(nn.Module):
             output_dim=self.__max_num_slot,
             dropout_rate=self.__args.dropout_rate,
             embedding_dim=self.__args.slot_embedding_dim,
+            extra_dim=self.__num_intent,
             mem_dim=self.__mem_embedding_dim,
             lk_dim=self.__args.local_knowledge_hidden_dim,
             his_dim=self.__args.history_hidden_dim,
@@ -228,7 +230,7 @@ class ModelManager(nn.Module):
 
         print('\nEnd of parameters show. Now training begins.\n\n')
 
-    def forward(self, text, seq_lens, text_triple=None, kb=None, dial_id=None, turn_id=None, history=None, n_predicts=None, forced_slot=None, forced_intent=None, local=None, turn_index=None, if_train=None):
+    def forward(self, text, seq_lens, text_triple=None, kb=None, dial_id=None, turn_id=None, history=None, n_predicts=None, forced_slot=None, forced_intent=None, local=None, turn_index=None, if_train=None, prev_slot=None, prev_intent=None):
         cat_init_hiddens = nn.Parameter(
                 torch.zeros(sum(seq_lens), 1),
                 requires_grad=True
@@ -263,77 +265,39 @@ class ModelManager(nn.Module):
             # kb_hiddens = extend_mem(kb_tmp_hiddens, seq_lens)
             # print(seq_lens) #[5, 6, 11, 17, 8, 3]  [14, 4, 16, 1, 3, 7]  [6, 1, 2, 1, 1, 1]
 
-            "-----------------history-------------------------"
+            "-----------------SDEN history-------------------------"
             H = []
-            for h in history:
-                mask = (h!=self.pad_idx)
-                length = mask.sum(1).long()
-                h_concat = torch.cat([h[i][:length[i]] for i in range(0,len(length)) ], dim=0)
-                if h_concat.size(0)==0:
-                    h_concat = torch.zeros(1,dtype=torch.int64).cuda()
-                # if if_train:
-                #     h_concat = h_concat.cuda()
-                # h_concat = h_concat.unsqueeze(0)
-                H.append(h_concat)
-            history_len_list = [h.size(0) if h.size(0)>0  else 1 for h in H]
-            max_history_len = max(history_len_list)
-            pad_h = []
-            for h_index in range(len(H)):
-                padding = torch.zeros(max_history_len - history_len_list[h_index],dtype=torch.int64).cuda()
-                # if if_train:
-                #     padding = padding.cuda()
-                tmp_pad_h = torch.cat([H[h_index],padding] ,dim=0)
-                tmp_pad_h = tmp_pad_h.unsqueeze(0)
-                h_embeds, _ = self.__embedding(tmp_pad_h)
-                h_embeds = self.__drop_out_layer(h_embeds)
-                # h_hidden, _ = self.__history_lstm(h_embeds)
-                pad_h.append(h_embeds)
-            raw_history_hidden = torch.cat(pad_h)
+            history = history.squeeze(dim=0)
+            mask = (history != self.pad_idx)
+            history_len = mask.sum(-1).long()
+            history_len = [history_len[i] if history_len[i] > 0 else 1 for i in range(len(history_len))]
+            history_emb, _ = self.__embedding(history)
+            history_hidden = self.__encoder(history_emb, history_len)
 
-            # main action
-            encoded_history_hidden = self.__encoder(raw_history_hidden,history_len_list)
+            att_his_hidden = self.__his_attention_layer(lstm_hiddens, history_hidden, history_hidden)  # 传这个
+            mix_his_hidden = torch.cat([lstm_hiddens, att_his_hidden], dim=1)
+            # mix_his_hidden = self.__mix_linear_layer(mix_his_hidden)
+            mix_his_hidden = self.__drop_out_layer(mix_his_hidden)
 
-            att_his = []
-            for i,[text_len,history_len] in enumerate(zip(seq_lens,history_len_list)):
-                word_begin_index = 0
-                word_end_index = word_begin_index + text_len
-                tmp_text_hidden = lstm_hiddens[word_begin_index:word_end_index,:]
-                word_begin_index = word_end_index
-
-                history_begin_index = 0
-                history_end_index = history_begin_index + history_len
-                tmp_his_hidden = encoded_history_hidden[history_begin_index:history_end_index,:]
-                history_begin_index = history_end_index
-
-                att_his_hidden = self.__his_attention_layer(tmp_text_hidden, tmp_his_hidden, tmp_his_hidden)
-                # print(tmp_text_hidden.size())
-                # print(tmp_his_hidden.size())
-                att_his.append(att_his_hidden)
-            his_hidden = torch.cat(att_his,dim=0)
-            his_hidden = self.__drop_out_layer(his_hidden)
-
-            # his_tmp_hiddens = self.__his_mem.load_mem(story=history, hidden=ctrnn_hiddens)
-            # his_hiddens = extend_mem(his_tmp_hiddens, seq_lens)
             "-----------------new local knowledge-----------------------"
-            local = local.view(local.size(0),-1)
-            # print(local)
-            encoded_local_hidden, _ = self.__embedding(local)
-            # att_local_hidden = self.__lk_attention_layer(local, lstm_hiddens, lstm_hiddens)
-            att_local = []
-            for i, text_len in enumerate(seq_lens):
-                word_begin_index = 0
-                word_end_index = word_begin_index + text_len
-                tmp_text_hidden = lstm_hiddens[word_begin_index:word_end_index,:]
-                word_begin_index = word_end_index
-
-                tmp_local_hidden = encoded_local_hidden[i,:]
-
-                # print(tmp_text_hidden.size())
-                # print(tmp_local_hidden.size())
-                att_local_hidden = self.__lk_attention_layer(tmp_text_hidden, tmp_local_hidden, tmp_local_hidden)
-                att_local.append(att_local_hidden)
-            local_hidden = torch.cat(att_local)
-            local_hidden = self.__drop_out_layer(local_hidden)
+            # local = local.view(local.size(0),-1)
+            # encoded_local_hidden, _ = self.__embedding(local)
+            # # att_local_hidden = self.__lk_attention_layer(local, lstm_hiddens, lstm_hiddens)
+            # att_local = []
+            # for i, text_len in enumerate(seq_lens):
+            #     word_begin_index = 0
+            #     word_end_index = word_begin_index + text_len
+            #     tmp_text_hidden = lstm_hiddens[word_begin_index:word_end_index,:]
+            #     word_begin_index = word_end_index
+            #
+            #     tmp_local_hidden = encoded_local_hidden[i,:]
+            #
+            #     # print(tmp_text_hidden.size())
+            #     # print(tmp_local_hidden.size())
+            #     att_local_hidden = self.__lk_attention_layer(tmp_text_hidden, tmp_local_hidden, tmp_local_hidden)
+            #     att_local.append(att_local_hidden)
+            # local_hidden = torch.cat(att_local)
+            # local_hidden = self.__drop_out_layer(local_hidden)
             "-----------------single local knowledge--------------------"#TODO
             # prev_slot = Variable(prev_slot_list[-1][0], requires_grad=True)
             # prev_intent = Variable(prev_intent_list[-1][0], requires_grad=True)
@@ -366,16 +330,13 @@ class ModelManager(nn.Module):
             # lk_lstm_hiddens = self.__linear_list[4](lk_lstm_hiddens)
             # hiddens = torch.cat([lstm_hiddens, attention_hiddens, kb_hiddens, his_hiddens, lk_lstm_hiddens], dim=1)
             # hiddens = torch.cat([lstm_hiddens, attention_hiddens],dim=1)
-            hiddens = lstm_hiddens
+            hiddens = mix_his_hidden
         else:
             hiddens = torch.cat([lstm_hiddens ,attention_hiddens],dim=1) #不加mem
 
 
-        pred_intent = self.__intent_decoder(
-            encoded_hiddens=hiddens,
-            seq_lens=seq_lens,
-            forced_input=forced_intent
-        )
+        pred_intent, intent_out = self.__intent_decoder(encoded_hiddens=hiddens,seq_lens=seq_lens,forced_input=forced_intent,if_print=False)
+
         # intent传入时，依照参数diff确定输入的数量，if not 就输入1个 else 都输入
         # 这里也就是将token-level的intent转为utterance-level
         if not self.__args.differentiable:
@@ -403,21 +364,30 @@ class ModelManager(nn.Module):
             curr_slot_decoder = self.__slot_decoder2
 
         #  dim : 384 & num_intent
-        pred_slot = curr_slot_decoder(
-            encoded_hiddens=hiddens,
-            seq_lens=seq_lens,
-            forced_input=forced_slot
-        )
+        # pred_slot = curr_slot_decoder(
+        #     encoded_hiddens=hiddens,
+        #     seq_lens=seq_lens,
+        #     forced_input=forced_slot
+        # )
+
+        pred_slot, slot_out = curr_slot_decoder(encoded_hiddens=hiddens, seq_lens=seq_lens,forced_input=forced_slot,extra_input=feed_intent, history=att_his_hidden, local=local,if_print=True)
+
+        if if_train:
+            intent_out = intent_out.squeeze(0)
+            slot_out = slot_out.squeeze(0)
+        else:
+            intent_out = intent_out.squeeze(1)
+            slot_out = slot_out.squeeze(1)
 
         _, slot_idx = pred_slot.topk(1, dim=1)
 
         if n_predicts is None:
-            return F.log_softmax(pred_slot, dim=1), F.log_softmax(pred_intent, dim=1), slot_idx.cpu().data.numpy().tolist(), intent_idx.cpu().data.numpy().tolist()
+            return F.log_softmax(pred_slot, dim=1), F.log_softmax(pred_intent, dim=1), slot_out, intent_out
         else:
             _, slot_index = pred_slot.topk(n_predicts, dim=1)
             _, intent_index = pred_intent.topk(n_predicts, dim=1)
             # print(pred_intent.topk(n_predicts, dim=1))
-            return slot_index.cpu().data.numpy().tolist(), intent_index.cpu().data.numpy().tolist()
+            return slot_index.cpu().data.numpy().tolist(), intent_index.cpu().data.numpy().tolist(), slot_out, intent_out
 
     def golden_intent_predict_slot(self, text, seq_lens, golden_intent, n_predicts=1):
         word_tensor, _ = self.__embedding(text)
@@ -545,17 +515,18 @@ class LSTMDecoder(nn.Module):
         """
 
         super(LSTMDecoder, self).__init__()
-        if(add_mem):
-            self.__input_dim = input_dim #第三个mem_dim其实是history_dim
+        if (add_mem):
+            self.__input_dim = input_dim + his_dim # 第三个mem_dim其实是history_dim
         else:
             self.__input_dim = input_dim
 
-        self.__hidden_dim = hidden_dim   #intent decoder dim 8 or slot_decoder_dim 64
+        self.__hidden_dim = hidden_dim  # intent decoder dim 8 or slot_decoder_dim 64
         self.__output_dim = output_dim
         self.__dropout_rate = dropout_rate
         self.__embedding_dim = embedding_dim
         self.__extra_dim = extra_dim
 
+        self.__his_dim = his_dim
         # If embedding_dim is not None, the output and input
         # of this structure is relevant.
         if self.__embedding_dim is not None:
@@ -578,19 +549,50 @@ class LSTMDecoder(nn.Module):
         # Network parameter definition.
         self.__dropout_layer = nn.Dropout(self.__dropout_rate)
         self.__lstm_layer = nn.LSTM(
-            input_size=lstm_input_dim,
+            input_size=lstm_input_dim + his_dim,
             hidden_size=self.__hidden_dim,
             batch_first=True,
             bidirectional=False,
             dropout=self.__dropout_rate,
             num_layers=1
         )
+
+        self.__lstm_layer2 = nn.LSTM(
+            input_size=self.__hidden_dim,
+            hidden_size=self.__hidden_dim,
+            batch_first=True,
+            bidirectional=False,
+            dropout=self.__dropout_rate,
+            num_layers=1
+        )
+
         self.__linear_layer = nn.Linear(
             self.__hidden_dim,
             self.__output_dim
         )
+        self.__H_linear_layer = nn.Linear(
+            lstm_input_dim + his_dim,
+            lstm_input_dim
+        )
 
-    def forward(self, encoded_hiddens, seq_lens, forced_input=None, extra_input=None ):
+        self.__H_att_layer = QKVAttention(
+            query_dim=lstm_input_dim + his_dim,
+            key_dim=lstm_input_dim + his_dim,
+            value_dim=lstm_input_dim + his_dim,
+            hidden_dim=hidden_dim,
+            output_dim=lstm_input_dim,
+            dropout_rate=self.__dropout_rate
+        )
+
+        # if extra_dim is not None:
+        #     print(input_dim+input_dim+his_dim+extra_dim)  578
+        if extra_dim is None:
+            ed = 0
+        else:
+            ed = extra_dim
+        self.__session_encoder = nn.GRU(self.__input_dim + his_dim + ed, his_dim, batch_first=True, bidirectional=False)
+
+    def forward(self, encoded_hiddens, seq_lens, forced_input=None, extra_input=None, history=None, local=None, if_print=None):
         """
             Forward process for decoder.
             :param encoded_hiddens: is encoded hidden tensors produced by encoder.
@@ -608,60 +610,94 @@ class LSTMDecoder(nn.Module):
             input_tensor = encoded_hiddens
         # final return output list
         output_tensor_list, sent_start_pos = [], 0
+        lstm_out_list = []
         # 在train的时候 进入这个分支
         if self.__embedding_dim is None:
             print("embedding dim is none")
+
+        if history is not None:
+            mix_his = torch.cat([history, input_tensor], dim=1)
+            mix_his = mix_his.unsqueeze(0)
+            _, H = self.__session_encoder(mix_his)
+        else:
+            H = torch.zeros(1, 1, self.__his_dim).cuda()
+        C = torch.zeros(1, 1, self.__his_dim).cuda()
+
+        new_input_list = []
+        for single_o in input_tensor:
+            tmp_o = single_o.unsqueeze(0)
+            tmp_H = H.squeeze(0)
+            new_input_list.append(torch.cat([tmp_o, tmp_H], dim=1))
+        new_input = torch.cat(new_input_list, dim=0)
 
         if self.__embedding_dim is None or forced_input is not None:
             for sent_i in range(0, len(seq_lens)):
                 sent_end_pos = sent_start_pos + seq_lens[sent_i]
                 # Segment input hidden tensors.
-                seg_hiddens = input_tensor[sent_start_pos: sent_end_pos, :]
+                seg_hiddens = new_input[sent_start_pos: sent_end_pos, :]
+                # ---------------end here----------------------
                 if self.__embedding_dim is not None and forced_input is not None:
                     # print("confirm here") #在train里 每一次都是进这里
                     # self init is random tensor
                     # TODO Thinking why set seq_lens>1 enter here,when set 0 ,no error
-                    if seq_lens[sent_i] > 0: # original is 1
+                    if seq_lens[sent_i] > 0:  # original is 1
                         seg_forced_input = forced_input[sent_start_pos: sent_end_pos]
                         seg_forced_tensor = self.__embedding_layer(seg_forced_input).view(seq_lens[sent_i], -1)
                         seg_prev_tensor = torch.cat([self.__init_tensor, seg_forced_tensor[:-1, :]], dim=0)
                     else:
-                        # only when seq_len =1 ,enter here
-                        seg_prev_tensor = self.__init_tensor
-
+                        seg_prev_tensor = self.__init_tensor  # only when seq_len =1 ,enter here
                     # Concatenate forced target tensor.
                     combined_input = torch.cat([seg_hiddens, seg_prev_tensor], dim=1)
                 else:
-                    print("where am I")  #似乎并不从这里走
+                    print("where am I")  # 似乎并不从这里走
                     combined_input = seg_hiddens
+                # 输入数据格式：
+                # input(seq_len, batch, input_size)     h0(num_layers * num_directions, batch, hidden_size)     c0(num_layers * num_directions, batch, hidden_size)
+                # 输出数据格式：
+                # output(seq_len, batch, hidden_size * num_directions)  hn(num_layers * num_directions, batch, hidden_size) cn(num_layers * num_directions, batch, hidden_size)
 
-                # single sentence input three network
-                dropout_input = self.__dropout_layer(combined_input)
-                # print(combined_input.size())
-                lstm_out, _ = self.__lstm_layer(dropout_input.view(1, seq_lens[sent_i], -1))
-
-                # print(lstm_out.size()) #1 6 64
+                dropout_input = self.__dropout_layer(combined_input)  # 256+16 or 256+64
+                # new_input = self.__H_linear_layer(new_input)
+                # att_new_input = self.__H_att_layer(new_input,new_input,new_input)
+                lstm_out, (h, c) = self.__lstm_layer(dropout_input.view(1, seq_lens[sent_i], -1), (H, C))
+                # print(h.size())  # 1 1 64
+                # lstm_out2 ,(h2,c2) = self.__lstm_layer2(lstm_out,(h,c))
                 linear_out = self.__linear_layer(lstm_out.view(seq_lens[sent_i], -1))
-
-
                 output_tensor_list.append(linear_out)
                 sent_start_pos = sent_end_pos
-                # print("-------------------")
+                lstm_out_list.append(lstm_out)
+
+                # if history is not None:
+                #     print(seg_hiddens.size())
+                #     print(history.size())
+                #     curr_len = seg_hiddens.size(0)+history.size(0)
+                #     his_combined_input = torch.cat([seg_hiddens, history], dim=0)
+                #     his_dropout_input = self.__dropout_layer(his_combined_input)
+                #     his_lstm_out, _ = self.__lstm_layer(his_dropout_input.view(1, curr_len, -1))
+                #     his_linear_out = self.__linear_layer(his_lstm_out.view(curr_len, -1))
+
 
         # DEV TEST Validate时 进入这个分支
         else:
             # self.__embedding_dim 非空 并且 forced_input 为空:
-            # print("here else")
             for sent_i in range(0, len(seq_lens)):
                 prev_tensor = self.__init_tensor
-
                 # It's necessary to remember h and c state
                 # when output prediction every single step.
                 last_h, last_c = None, None
-
                 sent_end_pos = sent_start_pos + seq_lens[sent_i]
+
+                # seg_hidden = input_tensor[sent_start_pos: sent_end_pos, :]
+                # combined_input = torch.cat([seg_hidden, prev_tensor], dim=1)
+                # dropout_input = self.__dropout_layer(combined_input).view(seq_lens[sent_i], 1, -1)
+                # lstm_out,_ = self.__lstm_layer(dropout_input)
+                # linear_out = self.__linear_layer(lstm_out.view(seq_lens[sent_i],-1))
+                # output_tensor_list.append(linear_out)
+                #
+                # sent_start_pos = sent_end_pos
+
                 for word_i in range(sent_start_pos, sent_end_pos):
-                    seg_input = input_tensor[[word_i], :]
+                    seg_input = new_input[[word_i], :]
                     combined_input = torch.cat([seg_input, prev_tensor], dim=1)
                     dropout_input = self.__dropout_layer(combined_input).view(1, 1, -1)
 
@@ -671,6 +707,8 @@ class LSTMDecoder(nn.Module):
                     else:
                         lstm_out, (last_h, last_c) = self.__lstm_layer(dropout_input, (last_h, last_c))
 
+                    lstm_out_list.append(lstm_out)
+
                     lstm_out = self.__linear_layer(lstm_out.view(1, -1))
                     output_tensor_list.append(lstm_out)
 
@@ -678,7 +716,7 @@ class LSTMDecoder(nn.Module):
                     prev_tensor = self.__embedding_layer(index).view(1, -1)
                 sent_start_pos = sent_end_pos
 
-        return torch.cat(output_tensor_list, dim=0)
+        return torch.cat(output_tensor_list, dim=0), torch.cat(lstm_out_list, dim=0)
 
 
 class QKVAttention(nn.Module):
